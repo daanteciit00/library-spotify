@@ -20,7 +20,6 @@
 <button class="stat" data-stat="compilations"><div class="num" id="compCount">—</div><label>Compilaciones</label></button>
 <button class="stat" data-stat="playlists"><div class="num" id="playlistCount">—</div><label>Playlists</label></button>
 </div>
-<div class="tabs"><button class="tab active" data-tab="albums">Álbumes</button><button class="tab" data-tab="eps">EP</button><button class="tab" data-tab="singles">Sencillos</button><button class="tab" data-tab="compilations">Compilaciones</button><button class="tab" data-tab="unclassified">Sin clasificar</button><button class="tab" data-tab="playlists">Playlists</button></div>
 <div class="tools"><input id="search" class="search" placeholder="Buscar en tu biblioteca…" autocomplete="off"><button id="refresh" class="ghost">Actualizar</button></div><div id="countline" class="countline"></div><div id="content" class="loading">Cargando tu biblioteca…</div>
 <div class="notice">La clasificación se contrasta con MusicBrainz cuando hay coincidencias fiables. Los datos de Spotify se conservan como referencia; los casos dudosos quedan sin clasificar.</div></div>
 <div id="detailView" class="hidden"><button id="back" class="ghost back">← Volver a la biblioteca</button><div id="detailContent"></div></div>
@@ -43,7 +42,55 @@ async function exchangeCode(){let p=new URLSearchParams(location.search),code=p.
 async function refreshAccess(){if(!refreshToken)throw Error('Tu sesión expiró. Vuelve a conectar Spotify.');let body=new URLSearchParams({client_id:CLIENT_ID,grant_type:'refresh_token',refresh_token:refreshToken}),r=await fetch('https://accounts.spotify.com/api/token',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body}),d=await r.json();if(!r.ok)throw Error('No se pudo renovar la sesión. Vuelve a conectar.');saveTokens(d)}
 async function api(url,retry=true){if(expiresAt&&Date.now()>expiresAt)await refreshAccess();let r=await fetch(url,{headers:{Authorization:'Bearer '+token}});if(r.status===401&&retry){await refreshAccess();return api(url,false)}if(!r.ok){let d={};try{d=await r.json()}catch{}throw Error(d.error?.message||`Spotify respondió ${r.status}.`)}return r.json()}
 async function allPages(url){let out=[],guard=0;while(url&&guard++<100){let d=await api(url);out.push(...(d.items||[]));url=d.next}return out}
-async function load(){ $('welcome').classList.add('hidden');$('app').classList.remove('hidden');$('homeView').classList.remove('hidden');$('detailView').classList.add('hidden');$('topStatus').textContent='CARGANDO…';$('content').className='loading';$('content').textContent='Cargando tu biblioteca…';try{let me=await api('https://api.spotify.com/v1/me');$('hello').textContent='Hola, '+(me.display_name||'');$('profileLine').textContent='Tu colección conectada';let [a,p]=await Promise.all([allPages('https://api.spotify.com/v1/me/albums?limit=50'),allPages('https://api.spotify.com/v1/me/playlists?limit=50')]);albums=a.map(x=>x.album).filter(Boolean);playlists=p;classified=albums.map(a=>({...a,libraryKind:spotifyFallback(a)}));await enrichClassifications();updateStats();$('topStatus').textContent='CONECTADO';render()}catch(e){$('content').className='empty error';$('content').textContent=e.message;$('topStatus').textContent='ERROR';if(/sesión|autorizar|conectar/i.test(e.message))showWelcomeError(e.message)}}
+async function load() {
+  $('welcome').classList.add('hidden');
+  $('app').classList.remove('hidden');
+  $('homeView').classList.remove('hidden');
+  $('detailView').classList.add('hidden');
+  $('topStatus').textContent = 'CARGANDO…';
+  $('content').className = 'loading';
+  $('content').textContent = 'Cargando tu biblioteca…';
+
+  try {
+    let me = await api('https://api.spotify.com/v1/me');
+
+    $('hello').textContent = 'Hola, ' + (me.display_name || '');
+    $('profileLine').textContent = 'Tu colección conectada';
+
+    let [a, p] = await Promise.all([
+      allPages('https://api.spotify.com/v1/me/albums?limit=50'),
+      allPages('https://api.spotify.com/v1/me/playlists?limit=50')
+    ]);
+
+    albums = a.map(x => x.album).filter(Boolean);
+    playlists = p;
+
+    classified = albums.map(a => ({
+      ...a,
+      libraryKind: spotifyFallback(a)
+    }));
+
+    // Mostrar la biblioteca inmediatamente.
+    updateStats();
+    $('topStatus').textContent = 'CONECTADO';
+    render();
+
+    // Clasificar en segundo plano.
+    enrichClassifications().then(() => {
+      updateStats();
+      render();
+    }).catch(console.error);
+
+  } catch (e) {
+    $('content').className = 'empty error';
+    $('content').textContent = e.message;
+    $('topStatus').textContent = 'ERROR';
+
+    if (/sesión|autorizar|conectar/i.test(e.message)) {
+      showWelcomeError(e.message);
+    }
+  }
+}
 function spotifyFallback(a){if(a.album_type==='compilation')return 'compilations';if(a.album_type==='album')return 'albums';if(a.album_type==='single'&&a.total_tracks===1)return 'singles';return 'unclassified'}
 // MusicBrainz enrichment is routed through a Netlify Function to keep requests polite and identify the app.
 async function mbRequest(params){let u='/.netlify/functions/musicbrainz?'+new URLSearchParams(params);let r=await fetch(u);if(!r.ok)throw Error('MusicBrainz no disponible');return r.json()}
@@ -51,7 +98,12 @@ const wait=ms=>new Promise(r=>setTimeout(r,ms));
 async function enrichClassifications(){
 // Only query ambiguous short releases: doing hundreds of metadata lookups on login would be slow.
 const candidates=classified.filter(a=>(a.album_type==='single'&&Number(a.total_tracks)>1)||(a.album_type==='album'&&Number(a.total_tracks)<=7));
-for(const a of candidates){try{await wait(1050);const match=await findMusicBrainzMatch(a);if(match){applyMbType(a,match);a.mbId=match.id}}catch(e){/* Keep Spotify fallback when metadata cannot be matched. */}}
+for(const a of candidates){try{await wait(1050);const match=await findMusicBrainzMatch(a);if (match) {
+  applyMbType(a, match);
+  a.mbId = match.id;
+  updateStats();
+  render();
+}}catch(e){/* Keep Spotify fallback when metadata cannot be matched. */}}
 }
 async function findMusicBrainzMatch(a){const q=await mbRequest({mode:'search',title:a.name,artist:(a.artists||[]).map(x=>x.name).join(' ')});const candidates=q['release-groups']||[];return candidates.find(g=>norm(g.title)===norm(a.name)&&((g['artist-credit']||[]).some(c=>norm(c.name||c.artist?.name)===norm(a.artists?.[0]?.name||''))))||candidates.find(g=>norm(g.title)===norm(a.name)&&Number(g.score)>=95)||null}
 function applyMbType(a,g){const types=g['secondary-types']||[],pt=g['primary-type'];if(types.includes('Compilation'))a.libraryKind='compilations';else if(pt==='EP')a.libraryKind='eps';else if(pt==='Album')a.libraryKind='albums';else if(pt==='Single')a.libraryKind='singles'}
